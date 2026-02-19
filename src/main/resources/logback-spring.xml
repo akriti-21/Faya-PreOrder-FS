@@ -1,0 +1,128 @@
+<!-- ================================================================
+     logback-spring.xml
+     IMPORTANT: Use logback-spring.xml (not logback.xml) to enable
+     Spring's <springProfile> conditional blocks and property resolution.
+
+     Strategy:
+       - Dev/Test: Human-readable colored console output
+       - Prod: Structured JSON to stdout (captured by container runtime)
+
+     What we log:
+       - HTTP request method, path, status, duration (via filter)
+       - Auth events: login success/failure (user ID only, never credentials)
+       - Business events: order placed, status changed, etc.
+       - All unhandled exceptions with stack trace + trace ID
+       - Startup: active profile, datasource URL (not credentials), Flyway results
+
+     What we NEVER log:
+       - Passwords, tokens, API keys — in any form, at any level
+       - Full request/response bodies (may contain PII or credentials)
+       - JWT token values (log subject claim only)
+       - Stack traces in API responses (log server-side, return trace ID)
+       - Credit card numbers or any PII in plain text
+     ================================================================ -->
+
+<configuration scan="true" scanPeriod="30 seconds">
+
+    <!-- ============================================================
+         SPRING PROFILE: dev / test
+         Human-readable colored output. Full stack traces.
+         ============================================================ -->
+    <springProfile name="dev,test">
+
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>
+                    %d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%cyan(%X{traceId:-NO_TRACE})] %boldWhite(%-40.40logger{39}) : %msg%n%throwable
+                </pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
+
+        <!-- Root logger: INFO in test (reduce CI noise), DEBUG in dev -->
+        <springProfile name="dev">
+            <root level="INFO">
+                <appender-ref ref="CONSOLE"/>
+            </root>
+            <logger name="com.foodorder" level="DEBUG" additivity="false">
+                <appender-ref ref="CONSOLE"/>
+            </logger>
+            <logger name="org.springframework.security" level="DEBUG" additivity="false">
+                <appender-ref ref="CONSOLE"/>
+            </logger>
+            <logger name="org.hibernate.SQL" level="DEBUG" additivity="false">
+                <appender-ref ref="CONSOLE"/>
+            </logger>
+            <!-- TRACE-level for SQL bind parameters — dev only, very verbose -->
+            <logger name="org.hibernate.type.descriptor.sql.BasicBinder" level="TRACE" additivity="false">
+                <appender-ref ref="CONSOLE"/>
+            </logger>
+        </springProfile>
+
+        <springProfile name="test">
+            <root level="WARN">
+                <appender-ref ref="CONSOLE"/>
+            </root>
+            <logger name="com.foodorder" level="INFO" additivity="false">
+                <appender-ref ref="CONSOLE"/>
+            </logger>
+        </springProfile>
+
+    </springProfile>
+
+    <!-- ============================================================
+         SPRING PROFILE: prod
+         Structured JSON output to stdout.
+         Container runtime (Docker/K8s) captures stdout and ships
+         to log aggregator (CloudWatch, Datadog, ELK stack, etc.)
+         No file appenders — file management is the orchestrator's job.
+
+         JSON fields: timestamp, level, traceId, logger, message, stackTrace
+         ============================================================ -->
+    <springProfile name="prod">
+
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+                <!--
+                    Minimal JSON pattern without external logstash-logback-encoder dependency.
+                    For teams with logstash-logback-encoder on the classpath, replace with:
+                    <encoder class="net.logstash.logback.encoder.LogstashEncoder"/>
+                    which produces richer structured output with automatic MDC fields.
+                -->
+                <pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z',UTC}","level":"%level","traceId":"%X{traceId:-}","logger":"%logger{36}","message":"%replace(%msg){'\"','\\\"'}","thread":"%thread"}%n</pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
+
+        <!-- Async appender wraps JSON appender: non-blocking log writes -->
+        <appender name="ASYNC_JSON" class="ch.qos.logback.classic.AsyncAppender">
+            <appender-ref ref="JSON_CONSOLE"/>
+            <!-- Never block the app thread waiting for log queue: discard instead -->
+            <neverBlock>true</neverBlock>
+            <queueSize>512</queueSize>
+            <!-- Include caller info for ERROR level -->
+            <includeCallerData>false</includeCallerData>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="ASYNC_JSON"/>
+        </root>
+
+        <!-- Our application code: INFO in prod -->
+        <logger name="com.foodorder" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_JSON"/>
+        </logger>
+
+        <!-- Suppress noisy framework loggers -->
+        <logger name="org.springframework.security" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_JSON"/>
+        </logger>
+        <logger name="org.hibernate.SQL" level="OFF"/>
+        <logger name="org.hibernate.type" level="OFF"/>
+        <logger name="com.zaxxer.hikari" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_JSON"/>
+        </logger>
+
+    </springProfile>
+
+</configuration>

@@ -1,0 +1,65 @@
+# =============================================================================
+# docker-compose.override.yml — Local development overrides
+#
+# Docker Compose automatically merges this file with docker-compose.yml
+# when running `docker compose up` locally.
+#
+# This file is committed. It contains NO secrets — only dev convenience
+# settings that would be inappropriate in production.
+#
+# In CI/CD, use `docker compose -f docker-compose.yml up` explicitly
+# to skip this override file.
+#
+# What this adds for local dev:
+#   - PostgreSQL port exposed on 127.0.0.1 for DB GUI tools
+#   - App filesystem no longer read-only (hot-reload dev mounts if needed)
+#   - Relaxed resource limits (dev machines are not constrained containers)
+#   - App port exposed without loopback restriction for easy browser testing
+# =============================================================================
+
+name: foodorder
+
+services:
+
+  postgres:
+    # Expose to host loopback ONLY — not 0.0.0.0.
+    # Allows local DB GUI tools (DBeaver, TablePlus) to connect.
+    # Only accessible from the developer's own machine.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    # More generous resource limits for dev
+    deploy:
+      resources:
+        limits:
+          cpus:   '2.0'
+          memory: 1G
+
+  app:
+    # In dev, bind to all interfaces so you can test from a browser
+    # without needing a reverse proxy.
+    # NEVER do this in production (see docker-compose.yml comment).
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+
+    # Disable read-only filesystem in dev to allow hot-reload tools,
+    # IDE debug agents, and framework temp file writes.
+    read_only: false
+
+    # Override resource limits to be more generous in dev
+    deploy:
+      resources:
+        limits:
+          cpus:   '2.0'
+          memory: 1G
+
+    environment:
+      # Enable remote debug port — NEVER in production.
+      # Attach debugger: IntelliJ/VS Code → localhost:5005
+      JAVA_TOOL_OPTIONS: >-
+        -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005
+
+    # Expose debugger port — loopback only
+    ports:
+      - "127.0.0.1:5005:5005"

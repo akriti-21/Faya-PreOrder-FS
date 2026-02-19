@@ -1,0 +1,225 @@
+# ================================================================
+# BASE CONFIGURATION — shared across all profiles
+# Sensitive values are NEVER hardcoded here.
+# Secrets are resolved from environment variables at runtime.
+# Profile-specific overrides live in application-{profile}.yml
+# ================================================================
+
+spring:
+  application:
+    name: foodorder-backend
+
+  # ----------------------------------------------------------------
+  # JPA / Hibernate baseline
+  # DDL strategy is intentionally left unset here — each profile
+  # sets it explicitly to force a deliberate decision per environment.
+  # ----------------------------------------------------------------
+  jpa:
+    open-in-view: false          # Disable OSIV: forces proper service-layer transactions
+    properties:
+      hibernate:
+        format_sql: false        # Overridden to true in dev only
+        jdbc:
+          batch_size: 25         # Batching for bulk inserts — baseline performance tuning
+        order_inserts: true
+        order_updates: true
+
+  # ----------------------------------------------------------------
+  # Flyway — schema migration (always enabled)
+  # Migrations live in src/main/resources/db/migration/
+  # Naming convention: V{version}__{description}.sql
+  # ----------------------------------------------------------------
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false   # Set to true only when adding Flyway to existing DB
+
+  # ----------------------------------------------------------------
+  # Jackson — JSON serialization defaults
+  # ----------------------------------------------------------------
+  jackson:
+    default-property-inclusion: non_null   # Omit null fields from responses
+    serialization:
+      write-dates-as-timestamps: false      # ISO-8601 strings, not epoch millis
+    deserialization:
+      fail-on-unknown-properties: false     # Tolerate extra fields from clients
+
+  # ----------------------------------------------------------------
+  # Actuator — expose only health externally
+  # Management port is separate to keep it off the public interface
+  # ----------------------------------------------------------------
+  management:
+    server:
+      port: 8081
+    endpoints:
+      web:
+        exposure:
+          include: health,info
+    endpoint:
+      health:
+        show-details: when-authorized   # Full detail only to ACTUATOR_ADMIN role
+
+server:
+  port: 8080
+  # Graceful shutdown: wait for in-flight requests to complete before stopping
+  shutdown: graceful
+  tomcat:
+    # Prevents log injection via user-controlled URL encoding
+    uri-encoding: UTF-8
+
+# ================================================================
+# APPLICATION-LEVEL CUSTOM PROPERTIES
+# All secrets resolved from environment variables (${VAR_NAME}).
+# Default values provided only for non-sensitive config.
+# ================================================================
+app:
+
+  # JWT configuration
+  # JWT_SECRET must be a base64-encoded string of at least 32 random bytes.
+  # Generate: openssl rand -base64 32
+  # NEVER commit a real value here.
+  jwt:
+    secret: ${JWT_SECRET}
+    expiration-ms: ${JWT_EXPIRATION_MS:3600000}          # Default: 1 hour
+    refresh-expiration-ms: ${JWT_REFRESH_EXPIRATION_MS:86400000}  # Default: 24 hours
+
+  # CORS — allowed origins injected at runtime per environment
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+    max-age-seconds: 3600
+
+---
+# ================================================================
+# DEV PROFILE
+# Developer experience focus. Verbose logging, permissive DDL.
+# Secrets can be set in .env (gitignored) loaded by docker-compose.
+# ================================================================
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/foodorder_dev}
+    username: ${DB_USERNAME:foodorder}
+    password: ${DB_PASSWORD:foodorder}
+    hikari:
+      pool-name: FoodOrder-Dev-Pool
+      maximum-pool-size: 5       # Low in dev — single developer instance
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: validate         # Flyway owns schema. validate catches drift early.
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    out-of-order: true           # Allow out-of-order migrations in dev branches
+
+logging:
+  level:
+    root: INFO
+    com.foodorder: DEBUG
+    org.springframework.security: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql: TRACE
+    org.springframework.web: DEBUG
+
+---
+# ================================================================
+# TEST PROFILE
+# Isolated, deterministic. Designed for CI pipelines.
+# Uses Testcontainers for real PostgreSQL — no in-memory fakes.
+# Reduced logging to keep CI output clean.
+# ================================================================
+spring:
+  config:
+    activate:
+      on-profile: test
+
+  datasource:
+    # Testcontainers overrides this URL dynamically in @SpringBootTest classes.
+    # The value here is a fallback for non-containerized unit tests.
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/foodorder_test}
+    username: ${DB_USERNAME:test}
+    password: ${DB_PASSWORD:test}
+    hikari:
+      pool-name: FoodOrder-Test-Pool
+      maximum-pool-size: 3
+      minimum-idle: 1
+
+  jpa:
+    show-sql: false
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    clean-on-validation-error: false
+    out-of-order: false
+
+  # Fixed test JWT secret — committed intentionally.
+  # This is a test-only value with no production significance.
+app:
+  jwt:
+    secret: dGVzdC1zZWNyZXQtZm9yLXRlc3RpbmctcHVycG9zZXMtb25seS0zMmNoYXI=
+    expiration-ms: 3600000
+    refresh-expiration-ms: 86400000
+  cors:
+    allowed-origins: http://localhost:3000
+
+logging:
+  level:
+    root: WARN
+    com.foodorder: INFO
+    org.springframework.security: WARN
+    org.hibernate.SQL: OFF
+
+---
+# ================================================================
+# PROD PROFILE
+# ALL secrets from environment variables — no defaults provided.
+# Fail-fast: missing required env vars will cause startup failure,
+# which is far better than starting with misconfiguration.
+# DDL is validate-only: Flyway owns all schema changes.
+# ================================================================
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  datasource:
+    url: ${DB_URL}               # No default — must be set. Fail-fast on missing.
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      pool-name: FoodOrder-Prod-Pool
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:20}
+      minimum-idle: ${DB_POOL_MIN_IDLE:5}
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      # Validate connections before use — catches stale connections after DB restart
+      connection-test-query: SELECT 1
+
+  jpa:
+    show-sql: false
+    hibernate:
+      ddl-auto: validate         # NEVER create/update in prod
+
+  flyway:
+    out-of-order: false
+
+logging:
+  level:
+    root: INFO
+    com.foodorder: INFO
+    org.springframework.security: WARN
+    org.hibernate.SQL: OFF
+  # Structured JSON logging in prod — appender defined in logback-spring.xml
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level [%X{traceId}] %logger{36} - %msg%n"

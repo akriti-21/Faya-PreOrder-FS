@@ -1,0 +1,30 @@
+-- ================================================================
+-- V1__init_schema.sql
+-- Initial schema migration placeholder
+--
+-- Flyway naming convention: V{version}__{description}.sql
+-- Version: integer or dotted (1, 1.1, 2)
+-- Description: words separated by underscores
+--
+-- Flyway runs this on startup if not already applied.
+-- The flyway_schema_history table tracks applied migrations.
+--
+-- TODO: Add real table definitions here (Day 2 when domain entities
+-- are defined). Examples:
+--
+-- CREATE TABLE users (
+--     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+--     email VARCHAR(255) UNIQUE NOT NULL,
+--     password_hash VARCHAR(255) NOT NULL,
+--     full_name VARCHAR(255) NOT NULL,
+--     role VARCHAR(50) NOT NULL DEFAULT 'CUSTOMER',
+--     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+--     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- );
+--
+-- CREATE INDEX idx_users_email ON users(email);
+-- ================================================================
+
+-- Placeholder: schema will be added when domain entities are defined.
+-- This file ensures Flyway initializes cleanly with no migration errors.
+SELECT 1;

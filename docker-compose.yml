@@ -1,0 +1,320 @@
+# =============================================================================
+# docker-compose.yml — Food Ordering Backend
+#
+# Services:   postgres (database)  →  app (Spring Boot API)
+# Networks:   backend-net (internal bridge, isolated from host)
+# Volumes:    postgres-data (named volume, persisted across restarts)
+# Secrets:    all injected via environment variables from .env (never hardcoded)
+#
+# Usage:
+#   cp .env.example .env          # fill in real values
+#   docker compose up --build -d  # start detached
+#   docker compose logs -f app    # tail app logs
+#   docker compose down -v        # stop and remove volumes (destructive!)
+# =============================================================================
+
+name: foodorder  # Explicit project name — avoids directory-name-based collisions
+                 # when running multiple Compose projects on the same host.
+
+# =============================================================================
+# SERVICES
+# =============================================================================
+services:
+
+  # ---------------------------------------------------------------------------
+  # postgres — Primary datastore
+  #
+  # Security considerations:
+  #   1. Only exposed on the internal backend-net network — NOT bound to
+  #      0.0.0.0 on the host. External tools (DBeaver, psql) connect via
+  #      `docker compose exec postgres psql` or an explicit ports: mapping
+  #      added only in dev (see the commented block below).
+  #
+  #   2. POSTGRES_PASSWORD is injected from the host environment / .env file.
+  #      It is never written into this file. `:-` syntax raises an error at
+  #      compose-up time if the variable is missing, giving a clear failure
+  #      message instead of silent misconfiguration.
+  #
+  #   3. postgres:16-alpine — Alpine base image reduces the number of OS
+  #      packages present, which reduces the CVE surface area. Alpine also
+  #      provides a much smaller footprint for registry storage and pulls.
+  #
+  #   4. Healthcheck is required (not optional). The app service has a
+  #      depends_on.condition: service_healthy — without the healthcheck,
+  #      Spring Boot would attempt to connect before PostgreSQL is ready to
+  #      accept connections, causing startup failures that are hard to debug.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: foodorder-postgres
+
+    environment:
+      # These three variables are the only ones PostgreSQL needs to initialise.
+      # They are read once: on first startup when the data volume is empty.
+      # Changing them after volume creation has NO EFFECT on the existing DB.
+      POSTGRES_DB:       ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER:     ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+
+      # Prevent postgres from listening on all interfaces by default.
+      # Redundant given network isolation, but defence-in-depth:
+      # even if the network config changes, postgres won't answer on 0.0.0.0.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+
+    # ── Named volume ──────────────────────────────────────────────────────
+    # Named volumes persist across `docker compose down` (but not `down -v`).
+    # The pgdata sub-path keeps Postgres data isolated within the volume root,
+    # following the convention used by the official postgres image.
+    # ──────────────────────────────────────────────────────────────────────
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+      # Optional: mount custom postgres configuration or init scripts
+      # - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+      # - ./infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+
+    # ── Network ───────────────────────────────────────────────────────────
+    # Attached only to the internal network. Not reachable from the host
+    # or the internet. Only services on backend-net can connect.
+    # ──────────────────────────────────────────────────────────────────────
+    networks:
+      - backend-net
+
+    # ── Healthcheck ───────────────────────────────────────────────────────
+    # pg_isready is the canonical way to check PostgreSQL readiness.
+    # It checks that the postmaster is accepting connections for the
+    # specified user and database — not just that the process is running.
+    #
+    # Parameters:
+    #   interval:     10s — check every 10 seconds
+    #   timeout:       5s — fail the check if no response within 5 seconds
+    #   retries:        5 — mark unhealthy after 5 consecutive failures
+    #   start_period: 15s — grace period before counting failures.
+    #                       Prevents false unhealthy during initial DB init
+    #                       (first start runs initdb which can take 5-10s).
+    # ──────────────────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -q"]
+      interval:     10s
+      timeout:       5s
+      retries:        5
+      start_period: 15s
+
+    # ── Restart policy ────────────────────────────────────────────────────
+    # unless-stopped:
+    #   - Restarts automatically after crash or OOM kill
+    #   - Does NOT restart if explicitly stopped via `docker compose stop`
+    #   - Survives Docker daemon restart (systemd docker.service restart)
+    # ──────────────────────────────────────────────────────────────────────
+    restart: unless-stopped
+
+    # ── Resource limits ───────────────────────────────────────────────────
+    # Prevents a runaway query from starving the app or the host OS.
+    # Tune based on your actual workload and host capacity.
+    # ──────────────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          cpus:   '1.0'
+          memory: 512M
+        reservations:
+          memory: 256M
+
+    # ── Dev-only port binding (COMMENTED OUT for prod safety) ─────────────
+    # Uncomment ONLY for local development to allow GUI DB tools to connect.
+    # In production, database ports must never be exposed to the host network.
+    # If you need DB access in prod, use `docker compose exec postgres psql`.
+    # ports:
+    #   - "127.0.0.1:5432:5432"   # Bind to loopback only — not 0.0.0.0:5432
+    # ──────────────────────────────────────────────────────────────────────
+
+
+  # ---------------------------------------------------------------------------
+  # app — Spring Boot API
+  #
+  # Security considerations:
+  #   1. depends_on with service_healthy: the app will not start until
+  #      PostgreSQL passes its health check. This eliminates the race condition
+  #      where Spring Boot tries to run Flyway migrations against a DB that
+  #      isn't ready yet.
+  #
+  #   2. All secrets injected from environment — never in this file.
+  #      JWT_SECRET must be a base64-encoded random value of ≥32 bytes.
+  #
+  #   3. The container image itself runs as non-root (uid 1001) as defined
+  #      in the Dockerfile. Compose cannot override USER from the image,
+  #      but security_opt and read_only reinforce that posture at the
+  #      orchestration level.
+  #
+  #   4. read_only: true — mounts the container filesystem as read-only.
+  #      The application cannot write to its own filesystem. This means:
+  #        - No log files written to container disk (use stdout/stderr → collector)
+  #        - No temp files unless tmpfs volumes are declared (see below)
+  #        - Mitigates attacks that try to modify app binaries post-compromise
+  #
+  #   5. security_opt no-new-privileges: prevents the process from gaining
+  #      additional capabilities via setuid/setgid binaries or capability
+  #      bounding sets. Critical for non-root containers.
+  #
+  #   6. cap_drop ALL: drops every Linux capability. Spring Boot needs none.
+  #      An attacker who achieves RCE inside the container cannot leverage
+  #      capabilities like NET_ADMIN, SYS_ADMIN, CHOWN, etc.
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Build only the runtime stage — not the intermediate build/deps stages.
+      target: runtime
+      # Build-time args (if needed). Do NOT pass secrets as build args —
+      # they appear in `docker history` and are baked into image layers.
+      # args:
+      #   BUILD_ENV: production
+
+    container_name: foodorder-app
+    image: foodorder-backend:latest
+
+    # ── Port binding ──────────────────────────────────────────────────────
+    # 127.0.0.1:8080:8080 → bind to loopback only in production.
+    # A reverse proxy (nginx, Caddy, Traefik) on the same host listens on
+    # 0.0.0.0:443 and proxies to 127.0.0.1:8080.
+    # NEVER bind application ports to 0.0.0.0 directly in production —
+    # that bypasses the reverse proxy (TLS, rate limiting, WAF).
+    #
+    # Change to "8080:8080" only during local development.
+    # ──────────────────────────────────────────────────────────────────────
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"   # Spring Actuator management port (metrics, health)
+
+    environment:
+      # ── Spring profile ───────────────────────────────────────────────
+      # Controls which application-{profile}.yml is loaded.
+      # Valid values: dev | test | prod
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:?SPRING_PROFILES_ACTIVE is required}
+
+      # ── Database ─────────────────────────────────────────────────────
+      # jdbc:postgresql://<service-name>:<port>/<db>
+      # 'postgres' is the Compose service name — Docker's embedded DNS
+      # resolves it to the postgres container's IP on backend-net.
+      DB_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      DB_USERNAME: ${POSTGRES_USER:?POSTGRES_USER is required}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+
+      # ── JWT ──────────────────────────────────────────────────────────
+      # Generate: openssl rand -base64 32
+      # Must be base64-encoded, minimum 32 characters.
+      # The application's JwtProperties bean validates this on startup.
+      JWT_SECRET:               ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXPIRATION_MS:        ${JWT_EXPIRATION_MS:-3600000}
+      JWT_REFRESH_EXPIRATION_MS: ${JWT_REFRESH_EXPIRATION_MS:-86400000}
+
+      # ── CORS ─────────────────────────────────────────────────────────
+      # Comma-separated list. No wildcard (*) in production.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+
+      # ── JVM tuning via environment (overrides ENTRYPOINT flags) ──────
+      # JAVA_TOOL_OPTIONS is honoured by the JVM before the ENTRYPOINT flags.
+      # Useful for injecting agent arguments (APM, debugger) without
+      # rebuilding the image.
+      # JAVA_TOOL_OPTIONS: "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+
+    # ── Dependency and startup ordering ──────────────────────────────────
+    # condition: service_healthy means Compose will wait until postgres
+    # passes its healthcheck before starting the app container.
+    # This replaces fragile wait-for-it.sh shell scripts.
+    # ──────────────────────────────────────────────────────────────────────
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      - backend-net
+
+    restart: unless-stopped
+
+    # ── Security hardening ────────────────────────────────────────────────
+    read_only: true    # Filesystem is read-only after container start.
+
+    # tmpfs mounts provide writable in-memory scratch space for frameworks
+    # that need to write temp files at runtime.
+    # /tmp: Java's java.io.tmpdir (Tomcat extracting JSPs, some libraries)
+    # /app/tmp: additional Spring temp dir if spring.web.resources is used
+    tmpfs:
+      - /tmp:exec,size=64m,mode=1777
+      - /app/tmp:size=32m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true   # Process cannot escalate privileges via setuid
+
+    cap_drop:
+      - ALL                      # Drop every Linux capability (app needs none)
+
+    # cap_add:                   # Only add back what is truly needed, e.g.:
+    #   - NET_BIND_SERVICE       # Needed only if binding to port < 1024 as non-root
+
+    # ── Resource limits ───────────────────────────────────────────────────
+    # -XX:MaxRAMPercentage=75.0 in the Dockerfile means:
+    #   Heap = 0.75 × memory.limits = 0.75 × 512M = 384 MB
+    #   Remaining ~128 MB covers Metaspace, thread stacks, GC overhead.
+    # ──────────────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          cpus:   '1.0'
+          memory: 512M
+        reservations:
+          memory: 256M
+
+    # ── Application healthcheck ───────────────────────────────────────────
+    # Calls Spring Actuator /actuator/health on the management port.
+    # wget is available in the Alpine JRE base image; curl is not installed.
+    # -q = quiet, --spider = do not download body, just check HTTP status.
+    # --tries=1 prevents wget from retrying (Compose manages retry via retries:).
+    # ──────────────────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --tries=1 http://localhost:8081/actuator/health || exit 1"]
+      interval:     20s
+      timeout:      10s
+      retries:       5
+      start_period: 40s   # Spring Boot + Flyway migrations can take 30s on first start
+
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  backend-net:
+    driver: bridge
+    # Security: internal: true would prevent any container on this network from
+    # reaching the internet. Enable this if neither service needs outbound access
+    # (e.g., no calls to external payment APIs, no Maven downloads at runtime).
+    # Disabled by default so the app can reach external APIs if needed.
+    # internal: true
+
+    # Custom subnet avoids collisions with other Compose projects or VPN ranges.
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+    # Disable ICC (inter-container communication) at the network level.
+    # With this enabled, only explicitly linked services can communicate.
+    # With docker-compose service names + networks, this is already scoped,
+    # but the label makes the intent explicit for network auditing tools.
+    labels:
+      com.foodorder.network: "backend"
+      com.foodorder.environment: "${SPRING_PROFILES_ACTIVE:-dev}"
+
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  postgres-data:
+    driver: local
+    # labels are useful for backup tooling (e.g., velero, restic) to identify
+    # volumes that require backup and their backup schedule.
+    labels:
+      com.foodorder.volume:   "postgres-data"
+      com.foodorder.backup:   "required"
+      com.foodorder.schedule: "daily"

@@ -1,0 +1,123 @@
+# =============================================================================
+# .dockerignore
+#
+# Controls what is sent to the Docker daemon as the "build context".
+# Everything listed here is EXCLUDED from that context.
+#
+# Why this matters:
+#   1. Performance: Sending fewer files to the daemon speeds up every build.
+#      A typical Spring Boot repo without .dockerignore sends target/ (100+ MB)
+#      on every build even though the Dockerfile never reads from it.
+#
+#   2. Security: Prevents secrets and credentials from being accidentally
+#      included in image layers. A .env file sent in build context can be
+#      accessed by any RUN or COPY instruction — even if you never
+#      intentionally copy it.
+#
+#   3. Layer cache stability: Including volatile files (IDE state, .git history)
+#      in the build context invalidates layers unnecessarily.
+#
+# Rule of thumb: default-deny. Only what the Dockerfile explicitly COPY-s
+# needs to be in the context. Everything else should be ignored.
+# =============================================================================
+
+
+# ── SECRETS — highest priority ────────────────────────────────────────────
+# These files must NEVER reach a Docker image layer under any circumstance.
+# If a .env file is baked into an image and that image is pushed to a
+# registry (even private), the secret is retrievable via `docker history`.
+.env
+.env.*
+*.env
+secrets/
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Maven build output ────────────────────────────────────────────────────
+# target/ is large (compiled classes, fat JAR, surefire reports).
+# The Dockerfile builds the JAR inside the container — it must NOT use
+# a pre-built JAR from the host. This enforces a clean, reproducible build.
+# If the host JAR was copied in, builds would silently differ between
+# developers and CI environments.
+target/
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Version control ───────────────────────────────────────────────────────
+# .git contains full commit history. Including it leaks:
+#   - Author names and email addresses
+#   - Commit messages that may reference tickets, internal systems, or secrets
+#   - Any file ever committed (including previously deleted secrets)
+# .git adds ~MB of data and invalidates caches on every commit.
+.git/
+.gitignore
+.gitattributes
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── IDE and editor state ──────────────────────────────────────────────────
+# These are volatile machine-specific files. Including them invalidates
+# Docker layer cache whenever a developer opens a file.
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*.orig
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Docker files themselves ───────────────────────────────────────────────
+# The Dockerfile and compose files don't need to be inside the image.
+# Including them serves no runtime purpose.
+Dockerfile*
+docker-compose*
+.dockerignore
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Documentation ─────────────────────────────────────────────────────────
+README*
+*.md
+docs/
+LICENSE*
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── OS artefacts ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Logs ─────────────────────────────────────────────────────────────────
+*.log
+logs/
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── Test output and coverage ─────────────────────────────────────────────
+# Test reports are generated in CI — they do not belong in a runtime image.
+**/surefire-reports/
+**/failsafe-reports/
+**/site/
+coverage/
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── CI / CD pipeline configs ─────────────────────────────────────────────
+# Pipeline definitions are consumed by the CI runner, not by the container.
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+.circleci/
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ── What IS included (for reference) ─────────────────────────────────────
+# The only files the Dockerfile actually reads are:
+#   pom.xml          → stage 1: dependency resolution
+#   src/             → stage 2: compilation
+# Everything else can safely be excluded.
+# ──────────────────────────────────────────────────────────────────────────
