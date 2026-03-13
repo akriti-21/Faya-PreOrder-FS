@@ -1,4 +1,4 @@
-package com.foodorder.config;
+package com.yourorg.foodorder.config;
 
 import com.foodorder.security.JwtAuthenticationEntryPoint;
 import com.foodorder.security.JwtAuthenticationFilter;

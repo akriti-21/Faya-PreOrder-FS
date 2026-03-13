@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Day 10 – Production Hardening additions
+# Merge these blocks into your existing application.yml
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Graceful shutdown ─────────────────────────────────────────────────────────
+server:
+  shutdown: graceful
+  # Reject requests larger than 1 MB at the Tomcat level (belt-and-suspenders
+  # alongside RequestSizeFilter)
+  tomcat:
+    max-http-form-post-size: 1MB
+    max-swallow-size: 1MB
+
+# ── Spring lifecycle ──────────────────────────────────────────────────────────
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  # ── Redis connection ────────────────────────────────────────────────────────
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 1000ms
+
+  # ── Cache ───────────────────────────────────────────────────────────────────
+  cache:
+    type: redis
+    redis:
+      time-to-live: 300000   # default 5 min (ms) — overridden per cache in RedisConfig
+
+# ── Rate limit tunables (read by RateLimitFilter via @Value if needed) ────────
+app:
+  rate-limit:
+    max-requests: 100
+    window-seconds: 60
+  idempotency:
+    ttl-hours: 24
+  performance:
+    slow-request-threshold-ms: 500

@@ -1,6 +1,6 @@
-package com.foodorder.controller;
+package com.yourorg.foodorder.controller;
 
-import com.foodorder.dto.response.ApiResponse;
+import com.yourorg.foodorder.dto.response.ApiResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -11,52 +11,34 @@ import java.time.Instant;
 import java.util.Map;
 
 /**
- * Application health check controller.
+ * Application-level health endpoint at /api/v1/health.
  *
- * Architecture note:
- * This is a lightweight custom health endpoint at /api/v1/health.
- * It is separate from Spring Actuator's /actuator/health which provides
- * detailed component health (DB connection, disk space, etc.) and is
- * served on the management port (8081).
+ * Distinct from /actuator/health (management port 8081):
  *
- * This endpoint:
- *   - Lives on the application port (8080) — accessible via the same
- *     network path as the API
- *   - Is publicly accessible without authentication (see SecurityConfig)
- *   - Returns a minimal "alive" signal suitable for load balancer probes
- *     and basic uptime monitoring
- *   - Does NOT perform DB health checks (use Actuator for that)
+ * /api/v1/health (this endpoint, port 8080):
+ *   - Liveness signal: "is the JVM running and serving requests?"
+ *   - No auth required (public)
+ *   - Suitable for load balancer health probes on the API port
+ *   - Does NOT check database or external dependencies
  *
- * Use /actuator/health for:
- *   - Deep health checks (DB, cache, external services)
- *   - Kubernetes readiness/liveness probes (on management port)
- *   - Detailed component status
- *
- * Use /api/v1/health for:
- *   - Load balancer health probes on the API port
- *   - Quick "is the app running?" check
- *   - Integration test baseline verification
+ * /actuator/health (port 8081):
+ *   - Readiness/liveness: checks DB pool, disk space, external services
+ *   - Managed separately; can be restricted to internal networks
+ *   - Use for Kubernetes readiness/liveness probes
+ *   - Use for deep health monitoring dashboards
  */
 @Slf4j
 @RestController
 @RequestMapping("/api/v1/health")
 public class HealthController {
 
-    /**
-     * Simple liveness check.
-     * Returns 200 OK with timestamp if the application context is running.
-     * Does not check database or external dependencies.
-     */
     @GetMapping
     public ResponseEntity<ApiResponse<Map<String, String>>> health() {
-        Map<String, String> healthData = Map.of(
-                "status", "UP",
+        Map<String, String> data = Map.of(
+                "status",    "UP",
                 "timestamp", Instant.now().toString(),
-                "service", "foodorder-backend"
+                "service",   "foodorder-backend"
         );
-
-        return ResponseEntity.ok(
-                ApiResponse.success("Service is running", healthData)
-        );
+        return ResponseEntity.ok(ApiResponse.success("Service is running", data));
     }
 }

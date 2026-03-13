@@ -1,45 +1,60 @@
-package com.foodorder.security;
+package com.yourorg.foodorder.security;
 
-import org.springframework.security.core.userdetails.User;
+import com.yourorg.foodorder.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
- * UserDetailsService implementation — loads user data for Spring Security.
+ * Spring Security UserDetailsService — loads user credentials and authorities
+ * from the database for JWT validation on every authenticated request.
  *
- * This is a SKELETON implementation for Day 1 infrastructure setup.
- * It will be replaced when the User domain entity and UserRepository are implemented.
+ * Replaces the Day 2 stub with a live implementation backed by UserRepository.
  *
- * TODO (Day 2): Replace this implementation with:
- *   1. Inject UserRepository
- *   2. Query: userRepository.findByEmail(username)
- *              .orElseThrow(() -> new UsernameNotFoundException(...))
- *   3. Return a SecurityPrincipal wrapping the User domain entity
+ * Called by:
+ *   1. JwtAuthenticationFilter — per authenticated request, extracts email
+ *      from JWT, loads UserDetails, populates SecurityContext.
+ *   2. DaoAuthenticationProvider (via AuthenticationManager) — during login,
+ *      loads user by email, compares stored BCrypt hash against submitted password.
  *
- * Current behavior: throws UsernameNotFoundException for all users.
- * This is intentional — authentication will fail gracefully until real
- * user data is wired in. The security infrastructure is fully functional.
+ * @Transactional(readOnly=true):
+ *   Opens a read-only transaction for the duration of the DB query.
+ *   readOnly=true hints to PostgreSQL and Hibernate to skip dirty checking
+ *   and use read-committed isolation, reducing overhead.
+ *   The JOIN FETCH in UserRepository.findByEmail() loads roles in a single
+ *   query within this transaction, avoiding LazyInitializationException.
  *
- * Architecture note: UserDetailsService is called by:
- *   - JwtAuthenticationFilter (on every authenticated request)
- *   - AuthenticationManager during login (via DaoAuthenticationProvider)
+ * Security contract:
+ *   - Returns SecurityPrincipal (wraps User) — not Spring's User builder.
+ *   - The generic error message "User not found" prevents email enumeration
+ *     — do NOT change the message to leak whether an account exists.
  */
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class UserDetailsServiceImpl implements UserDetailsService {
 
-    @Override
-    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
-        // TODO: Replace with real DB lookup
-        // User user = userRepository.findByEmail(username)
-        //     .orElseThrow(() -> new UsernameNotFoundException(
-        //         "User not found with email: " + username));
-        // return SecurityPrincipal.of(user);
+    private final UserRepository userRepository;
 
-        throw new UsernameNotFoundException(
-                "User not found: " + username +
-                " [UserDetailsServiceImpl is not yet wired to a real datasource]"
-        );
+    @Override
+    @Transactional(readOnly = true)
+    public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
+        // Email is normalised to lowercase at registration time.
+        // Lowercasing here defends against case-sensitivity drift between
+        // token generation and validation (e.g. "User@Example.com" in the JWT).
+        String normalisedEmail = email.toLowerCase().trim();
+
+        return userRepository.findByEmail(normalisedEmail)
+                .map(SecurityPrincipal::new)
+                .orElseThrow(() -> {
+                    // Log at DEBUG — INFO would fill logs during credential-stuffing attacks
+                    log.debug("Authentication attempt for unknown email: {}", normalisedEmail);
+                    // Generic message — never reveal whether the email is registered
+                    return new UsernameNotFoundException("User not found");
+                });
     }
 }

@@ -1,166 +1,238 @@
 # =============================================================================
-# MULTI-STAGE DOCKERFILE — Spring Boot / Maven / Java 17
+# Dockerfile — multi-stage build for Spring Boot 3 / Java 17
 #
-# Stages:
-#   1. deps     → Resolves Maven dependencies (layer-cache optimisation)
-#   2. build    → Compiles source and packages the fat JAR
-#   3. runtime  → Minimal JRE-only image that ships to production
+# Stages
+# ──────
+#   1. deps     Download Maven dependencies (cached layer — invalidated only
+#               when pom.xml changes, not on source changes)
+#   2. build    Compile source and package the fat JAR
+#   3. extract  Unpack the layered JAR into discrete directories
+#   4. runtime  Minimal JRE-only image; copy layers in cache-optimal order
 #
-# Security model:
-#   - Build tools (Maven, JDK) never reach the runtime image
-#   - Runtime image carries only: JRE + JAR + a non-root OS user
-#   - No shell, no package manager, no compiler in prod container
-#   - Read-only filesystem enforced at compose level (see docker-compose.yml)
+# Layered JAR (enabled in pom.xml)
+# ─────────────────────────────────
+# Spring Boot splits the fat-JAR into four layers ordered by change frequency:
+#   dependencies          3rd-party libs       → rarely changes → cached longest
+#   spring-boot-loader    Boot loader           → almost never changes
+#   snapshot-dependencies SNAPSHOT libs         → changes occasionally
+#   application           application code      → changes on every commit
+#
+# On a code-only change, Docker rebuilds only the top application layer (~2 MB).
+# The other three layers (~150 MB) are served from the layer cache.
+#
+# Base image choice: eclipse-temurin
+# ────────────────────────────────────
+# Eclipse Temurin is the Eclipse Foundation's production-grade OpenJDK build
+# (formerly AdoptOpenJDK). It is TCK-certified, receives regular security patches,
+# and is the recommended JDK for containerised Java workloads.
+# Alpine variant: ~200 MB vs ~600 MB for debian-slim; suitable for production.
+#
+# Security
+# ────────
+#   - JRE-only runtime: no compiler, no javac, no jlink in the final image
+#   - Non-root user spring (UID 1001, GID 1001)
+#   - No secrets baked into the image; all injected at runtime via env vars
+#   - read_only filesystem enforced in docker-compose; tmpfs for /tmp
 # =============================================================================
 
+# ─────────────────────────────────────────────────── Stage 1: dependency cache
+FROM maven:3.9-eclipse-temurin-17-alpine AS deps
 
-# -----------------------------------------------------------------------------
-# STAGE 1 — deps
-# Purpose: pre-warm the Maven local repository so that source-code changes
-# do not invalidate the dependency download layer.
-#
-# How it works:
-#   Copy pom.xml → resolve deps offline → Docker caches this layer.
-#   As long as pom.xml does not change, subsequent builds skip this stage.
-#   Source code changes only invalidate the cheaper build stage below.
-#
-# Security: this stage is discarded; nothing here reaches production.
-# -----------------------------------------------------------------------------
-FROM eclipse-temurin:17-jdk-alpine AS deps
-
-# Install Maven.
-# Alpine keeps the image small (~50 MB base vs ~200 MB for Debian variants).
-# apk --no-cache avoids writing an apk index to disk (smaller layer, no stale cache).
-RUN apk add --no-cache maven
+# Why this base image instead of eclipse-temurin + manual Maven install?
+# maven:3.9-eclipse-temurin-17-alpine is the official Maven image built on
+# Temurin — it includes a verified, pre-installed Maven 3.9 and the same JDK.
+# Installing Maven via `apk add maven` pulls the Alpine-packaged version which
+# may lag behind the official Maven release schedule.
 
 WORKDIR /build
 
-# Copy dependency descriptor only — NOT src.
-# If pom.xml is unchanged, Docker reuses the cached layer from this point forward.
-COPY pom.xml .
+# Copy only the POM first. Docker invalidates this layer only when pom.xml
+# changes — source edits leave the dependency download layer untouched.
+COPY pom.xml ./
 
-# go-offline downloads every declared dependency into /root/.m2.
-# -B = batch mode (no interactive prompts, cleaner CI output).
-# 2>/dev/null suppresses the Maven download progress bar in build logs.
-RUN mvn dependency:go-offline -B -q
+# Download all declared dependencies to the local repository.
+# -B = batch (no interactive prompts, clean CI output)
+# The .m2 directory is populated inside the image layer for the next stage.
+RUN mvn dependency:go-offline -B
 
-
-# -----------------------------------------------------------------------------
-# STAGE 2 — build
-# Purpose: compile source code and produce the executable fat JAR.
-#
-# We start FROM the deps stage so /root/.m2 is already populated.
-# No network access is needed here because all deps are in the local repo.
-#
-# Security:
-#   -DskipTests: tests run in your CI pipeline before the Docker build,
-#   not inside the image build itself. Building an image is not a test step.
-# -----------------------------------------------------------------------------
+# ────────────────────────────────────────────────────────── Stage 2: build JAR
 FROM deps AS build
 
-# Copy source tree. This layer is invalidated on every source change,
-# but the deps layer above is still cached if pom.xml is unchanged.
-COPY src ./src
+# Copy Maven wrapper configuration (version pins the Maven wrapper release)
+COPY .mvn/ .mvn/
 
-# Package: produces target/*.jar (Spring Boot repackaged fat JAR).
-# -q quiets the Maven lifecycle log; CI pipelines can remove -q if preferred.
-RUN mvn package -DskipTests -B -q
+# Copy application source. Separated from pom.xml copy so this layer is only
+# invalidated when source changes, not when re-running the same pom.xml.
+COPY src/ src/
 
+# Compile and package. Flags:
+#   -B           batch mode — no ANSI colours in CI logs
+#   -DskipTests  tests run in the CI pipeline, not during image builds
+#   -o           offline — use the .m2 cache populated in the deps stage
+RUN mvn package -B -DskipTests -o
 
-# -----------------------------------------------------------------------------
-# STAGE 3 — runtime
-# Purpose: the image that actually runs in production.
-#
-# eclipse-temurin:17-jre-alpine breakdown:
-#   eclipse-temurin  → Adoptium/Eclipse Foundation distribution (production-grade,
-#                       security-patched, widely used in enterprise).
-#   17               → LTS Java version matched to pom.xml <java.version>.
-#   jre              → Runtime only — no javac, jshell, or compiler toolchain.
-#                       Reduces image size by ~120 MB and attack surface further.
-#   alpine           → musl-libc based minimal OS (~5 MB). No bash, no apt,
-#                       no unnecessary binaries that could be leveraged post-compromise.
-#
-# Size comparison (approximate):
-#   eclipse-temurin:17-jdk-alpine   ~  340 MB
-#   eclipse-temurin:17-jre-alpine   ~  215 MB  ← we use this
-#   eclipse-temurin:17-jre          ~  380 MB
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────── Stage 3: extract layers
+FROM eclipse-temurin:17-jre-alpine AS extract
+
+WORKDIR /extract
+
+# Copy only the fat JAR from the build stage — nothing else
+COPY --from=build /build/target/*.jar app.jar
+
+# jarmode=layertools extracts the layered JAR into subdirectories.
+# Each subdirectory becomes a separate COPY in the runtime stage,
+# which Docker maps to a separate image layer.
+RUN java -Djarmode=layertools -jar app.jar extract
+
+# ──────────────────────────────────────────────────────── Stage 4: runtime
 FROM eclipse-temurin:17-jre-alpine AS runtime
 
-# ── Security: non-root user ────────────────────────────────────────────────
-#
-# Running as root inside a container is dangerous:
-#   1. If the process is exploited, the attacker has root inside the container.
-#   2. Misconfigured bind mounts or privileged escalation could give root on
-#      the host kernel.
-#   3. Many container security scanners (Trivy, Snyk, etc.) flag root execution
-#      as a critical finding.
-#
-# We create a dedicated system group + user with:
-#   -S  → system account (no password, no home dir login shell)
-#   -G  → assign to the system group
-#   UID/GID 1001 → non-overlapping with common host UIDs to reduce accidental
-#                  permission collisions on bind mounts.
-# ──────────────────────────────────────────────────────────────────────────
-RUN addgroup -S -g 1001 appgroup \
- && adduser  -S -u 1001 -G appgroup appuser
+# ── Labels ────────────────────────────────────────────────────────────────────
+# OCI standard labels for image metadata.
+# git-sha and build-date are injected at build time via --build-arg.
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
 
-# ── Filesystem layout ─────────────────────────────────────────────────────
-# /app is the working directory. We do NOT use /home or /root so that
-# the non-root user does not need write access to home directories.
-# ──────────────────────────────────────────────────────────────────────────
+LABEL org.opencontainers.image.title="foodorder-backend"
+LABEL org.opencontainers.image.description="FoodOrder Spring Boot REST API"
+LABEL org.opencontainers.image.base.name="eclipse-temurin:17-jre-alpine"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+
+# ── Non-root user ─────────────────────────────────────────────────────────────
+# Fixed UID/GID (1001) for predictable file ownership in volume mounts and
+# audit logs. Never run production JVM processes as root.
+RUN addgroup -S spring -g 1001 \
+ && adduser  -S spring -u 1001 -G spring
+
 WORKDIR /app
 
-# Copy the built JAR from the build stage — only the artefact, nothing else.
-# --chown sets ownership at copy time (single layer, no extra RUN chown needed).
-COPY --from=build --chown=appuser:appgroup /build/target/*.jar app.jar
+# ── Layered JAR — copy in order of change frequency (least → most) ────────────
+# Each COPY creates a Docker layer. Ordering by change frequency means
+# the layers most likely to be cache-hit (dependencies, loader) come first.
+COPY --from=extract --chown=spring:spring /extract/dependencies/           ./
+COPY --from=extract --chown=spring:spring /extract/spring-boot-loader/     ./
+COPY --from=extract --chown=spring:spring /extract/snapshot-dependencies/  ./
+COPY --from=extract --chown=spring:spring /extract/application/            ./
 
-# Switch to non-root before any further commands and for CMD execution.
-USER appuser
+USER spring:spring
 
-# ── Port ───────────────────────────────────────────────────────────────────
-# EXPOSE is documentation only — it does not publish the port.
-# Actual port binding is declared in docker-compose.yml.
-# Using an unprivileged port (>1024) is required when running as non-root
-# without NET_BIND_SERVICE capability.
-# ──────────────────────────────────────────────────────────────────────────
+# ── Port ──────────────────────────────────────────────────────────────────────
+# Expose API port. Management port (8081) stays internal and is not published
+# to the host — only accessible within the Docker network.
 EXPOSE 8080
 
-# ── JVM flags ──────────────────────────────────────────────────────────────
-# Configured for containerised environments:
-#
-# -XX:+UseContainerSupport (default JDK 17)
-#   Makes the JVM read cgroup v1/v2 memory and CPU limits instead of host
-#   totals. Without this, a JVM in a 512 MB container could try to allocate
-#   several GB of heap based on the host RAM → OOMKilled immediately.
+# ── JVM tuning ────────────────────────────────────────────────────────────────
+# -XX:+UseContainerSupport  (default in JDK 11+)
+#   Reads cgroup memory/CPU limits instead of host hardware values.
+#   Without this, the JVM calculates heap based on host RAM and may be
+#   OOMKilled when the container limit is much lower than host RAM.
 #
 # -XX:MaxRAMPercentage=75.0
-#   Cap heap at 75% of container memory limit. The remaining 25% is reserved
-#   for: Metaspace, thread stacks, JIT code cache, GC overhead, and OS buffers.
-#   Rule of thumb: heap should never be 100% of available memory.
+#   Allow heap up to 75% of the container memory limit.
+#   The remaining 25% covers: Metaspace, thread stacks, JIT compiled code,
+#   GC bookkeeping, and OS buffers. Adjust for memory-intensive workloads.
 #
 # -XX:+ExitOnOutOfMemoryError
-#   Die fast on OOM rather than thrashing in a degraded state. Docker/K8s will
-#   restart the container. A limping JVM is far harder to diagnose than a clean
-#   crash + restart.
+#   Crash immediately on OOM instead of limping with degraded performance.
+#   Docker / Kubernetes will restart the container. A healthy restart is
+#   always better than a half-dead JVM serving partial responses.
+#
+# -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapdump.hprof
+#   Write a heap dump to /tmp on OOM. Combined with docker cp or a volume
+#   mount on /tmp, this enables post-mortem analysis without ssh access.
+#   /tmp is a tmpfs in docker-compose — heapdump survives the container restart.
 #
 # -Djava.security.egd=file:/dev/./urandom
-#   Spring Boot (and Tomcat) initialise SecureRandom on startup. On some Linux
-#   kernels, /dev/random can block if entropy is low, adding 30-60s to startup.
-#   /dev/urandom (via the non-blocking path) is cryptographically safe for
-#   session token generation and avoids this startup penalty.
-#   The '/dev/./' path is a workaround for an old JVM bug that incorrectly
-#   resolved /dev/urandom to /dev/random — still harmless on patched JDKs.
+#   Use /dev/urandom instead of /dev/random for SecureRandom seeding.
+#   Prevents startup delays in containers with low entropy pools.
+#   The /dev/./ path is a workaround for a JDK bug that redirected
+#   /dev/urandom to /dev/random on some Linux kernels; included for safety.
 #
 # -Dfile.encoding=UTF-8
-#   Alpine's default locale is POSIX/C which can cause charset issues with
-#   certain Jackson/Hibernate string handling. Pin to UTF-8 explicitly.
-# ──────────────────────────────────────────────────────────────────────────
-ENTRYPOINT ["java", \
-  "-XX:+UseContainerSupport", \
-  "-XX:MaxRAMPercentage=75.0", \
-  "-XX:+ExitOnOutOfMemoryError", \
-  "-Djava.security.egd=file:/dev/./urandom", \
-  "-Dfile.encoding=UTF-8", \
-  "-jar", "app.jar" \
-]
+#   Explicit UTF-8 regardless of the container's LANG/LC_ALL locale.
+#   Alpine containers often default to POSIX locale (US-ASCII), which
+#   causes garbled characters when reading UTF-8 configuration files.
+#
+# -Dspring.profiles.active
+#   Resolved at container startup from SPRING_PROFILES_ACTIVE env var.
+#   Defaults to 'prod' if not set — safe default for production deployments.
+ENTRYPOINT ["java",                                                    \
+    "-XX:+UseContainerSupport",                                        \
+    "-XX:MaxRAMPercentage=75.0",                                       \
+    "-XX:+ExitOnOutOfMemoryError",                                     \
+    "-XX:+HeapDumpOnOutOfMemoryError",                                 \
+    "-XX:HeapDumpPath=/tmp/heapdump.hprof",                            \
+    "-Djava.security.egd=file:/dev/./urandom",                         \
+    "-Dfile.encoding=UTF-8",                                           \
+    "-Dspring.profiles.active=${SPRING_PROFILES_ACTIVE:-prod}",        \
+    "org.springframework.boot.loader.launch.JarLauncher"]
+
+# ── Health check ──────────────────────────────────────────────────────────────
+# Docker uses this to determine container health status.
+# docker-compose depends_on: condition: service_healthy waits for this.
+# wget is available in eclipse-temurin alpine images.
+# --start-period=45s accounts for JVM startup + Flyway migration time.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD wget -qO- http://localhost:8080/api/v1/health || exit 1
+   # ═══════════════════════════════════════════════════════════════════════════════
+# Hardened multi-stage Dockerfile — Day 10
+# Does NOT modify any application source code.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM eclipse-temurin:17-jdk-alpine AS builder
+
+WORKDIR /build
+
+# Cache dependency layer
+COPY pom.xml .
+COPY .mvn/ .mvn/
+COPY mvnw .
+RUN chmod +x mvnw && ./mvnw dependency:go-offline -q
+
+# Build application
+COPY src/ src/
+RUN ./mvnw package -DskipTests -q
+
+# Extract layered jar for optimized Docker layers
+RUN java -Djarmode=layertools \
+         -jar target/*.jar extract --destination /build/layers
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────────────
+FROM eclipse-temurin:17-jre-alpine AS runtime
+
+# ── Security: non-root user ───────────────────────────────────────────────────
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /app
+
+# Copy layered jar content in dependency-cache-friendly order
+COPY --from=builder --chown=appuser:appgroup /build/layers/dependencies/          ./
+COPY --from=builder --chown=appuser:appgroup /build/layers/spring-boot-loader/    ./
+COPY --from=builder --chown=appuser:appgroup /build/layers/snapshot-dependencies/ ./
+COPY --from=builder --chown=appuser:appgroup /build/layers/application/           ./
+
+USER appuser
+
+# ── JVM memory limits ─────────────────────────────────────────────────────────
+ENV JAVA_OPTS="\
+  -XX:+UseContainerSupport \
+  -XX:MaxRAMPercentage=75.0 \
+  -XX:InitialRAMPercentage=50.0 \
+  -XX:+UseG1GC \
+  -XX:+HeapDumpOnOutOfMemoryError \
+  -XX:HeapDumpPath=/tmp/heapdump.hprof \
+  -Djava.security.egd=file:/dev/./urandom \
+  -Dspring.profiles.active=${SPRING_PROFILES_ACTIVE:production}"
+
+EXPOSE 8080
+
+# ── Health check ─────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=30s \
+            --timeout=5s \
+            --start-period=60s \
+            --retries=3 \
+  CMD wget -qO- http://localhost:8080/actuator/health | grep -q '"status":"UP"' || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.JarLauncher"] 

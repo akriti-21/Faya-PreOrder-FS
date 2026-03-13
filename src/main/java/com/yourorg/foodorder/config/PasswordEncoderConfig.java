@@ -6,41 +6,50 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 /**
- * Password encoding configuration.
+ * Password encoding configuration — intentionally isolated from
+ * {@link SecurityConfig}.
  *
- * Architecture decisions:
+ * <h3>Why a dedicated class?</h3>
+ * {@code SecurityConfig} depends on {@code JwtAuthenticationFilter}, which
+ * depends on {@code UserDetailsService}. If {@code PasswordEncoder} were
+ * defined inside {@code SecurityConfig}, and any auth service injected both
+ * {@code SecurityConfig} beans and {@code PasswordEncoder}, Spring would
+ * detect a circular dependency at startup. Isolating {@code PasswordEncoder}
+ * in its own {@code @Configuration} class breaks that cycle entirely.
  *
- * 1. BCrypt is the correct choice for password storage:
- *    - Adaptive: cost factor can be increased as hardware gets faster
- *    - Built-in salt: eliminates rainbow table attacks without managing salt separately
- *    - Intentionally slow: brute-force cost is high by design
+ * <h3>Algorithm choice: BCrypt</h3>
+ * BCrypt is the correct default for password storage:
+ * <ul>
+ *   <li><b>Adaptive cost</b>: the work factor can be increased as hardware
+ *       improves, without invalidating existing hashes.</li>
+ *   <li><b>Built-in salt</b>: each hash embeds a unique salt; rainbow-table
+ *       attacks are infeasible even with a database breach.</li>
+ *   <li><b>Intentionally slow</b>: brute-force cost is architecturally high.</li>
+ * </ul>
  *
- * 2. Strength 12 (not the Spring default of 10):
- *    - Strength 10 was specified when average hardware was much slower
- *    - Strength 12 provides meaningfully higher brute-force resistance on modern hardware
- *    - Still fast enough for login UX (typically 200-400ms — acceptable for auth)
- *    - Rule of thumb: increase strength when hardware allows hashing below 250ms
+ * <h3>Cost factor 12</h3>
+ * Spring's default is 10 (calibrated for 2011 hardware). Factor 12 is
+ * approximately 4× slower than 10 and produces ~250–400 ms/hash on a modern
+ * server — acceptable for an authentication endpoint. Benchmark your target
+ * hardware and increase the factor when it drops below 200 ms.
  *
- * 3. Registered as a @Bean in its own @Configuration class:
- *    - Avoids circular bean dependency if SecurityConfig itself needs PasswordEncoder
- *    - Separates concerns: encoding policy is independent of authentication flow
- *    - Easy to swap (e.g., to Argon2) by changing only this class
- *
- * 4. Never use: MD5, SHA-1, SHA-256 alone, or plain text. These are not
- *    suitable for passwords (too fast, no built-in salting/stretching).
+ * <p><b>Never use</b>: MD5, SHA-1, SHA-256 (raw), or plain text for passwords.
+ * These are too fast, lack adaptive cost, and offer no built-in salting.
  */
 @Configuration
 public class PasswordEncoderConfig {
 
     /**
-     * BCrypt password encoder with cost factor 12.
+     * BCrypt encoder with cost factor 12.
      *
-     * Inject this bean wherever password encoding or verification is needed:
+     * <p>Injection pattern:
+     * <pre>{@code
+     *   @Autowired
      *   private final PasswordEncoder passwordEncoder;
      *
-     * Usage:
-     *   String hash = passwordEncoder.encode(rawPassword);
-     *   boolean matches = passwordEncoder.matches(rawPassword, storedHash);
+     *   // Encode:  String hash   = passwordEncoder.encode(rawPassword);
+     *   // Verify:  boolean match = passwordEncoder.matches(raw, hash);
+     * }</pre>
      */
     @Bean
     public PasswordEncoder passwordEncoder() {

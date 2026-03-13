@@ -1,65 +1,113 @@
 # =============================================================================
-# docker-compose.override.yml — Local development overrides
+# docker-compose.override.yml — local development overrides
 #
-# Docker Compose automatically merges this file with docker-compose.yml
-# when running `docker compose up` locally.
+# Docker Compose automatically merges this file with docker-compose.yml when
+# both files are present in the same directory. No flags needed:
 #
-# This file is committed. It contains NO secrets — only dev convenience
-# settings that would be inappropriate in production.
+#   docker compose up          ← uses docker-compose.yml + this file
+#   make up                    ← same
 #
-# In CI/CD, use `docker compose -f docker-compose.yml up` explicitly
-# to skip this override file.
+# To run WITHOUT overrides (production-parity smoke test):
+#   docker compose -f docker-compose.yml up
+#   make up-prod
 #
-# What this adds for local dev:
-#   - PostgreSQL port exposed on 127.0.0.1 for DB GUI tools
-#   - App filesystem no longer read-only (hot-reload dev mounts if needed)
-#   - Relaxed resource limits (dev machines are not constrained containers)
-#   - App port exposed without loopback restriction for easy browser testing
+# What this file adds for local development
+# ──────────────────────────────────────────
+#   Ports          Bind container ports to localhost so the app and DB are
+#                  reachable from the host machine (browser, Postman, pgAdmin)
+#   Dev profile    Switch Spring profile to 'dev' — verbose logging, SQL echo,
+#                  HikariCP debug, Flyway out-of-order migrations
+#   Remote debug   Open JDWP port 5005 for IDE step-through debugging
+#   read_only off  Allow the container filesystem to be writable (required for
+#                  live-reload agents and some IDE plugins)
+#   No limits      Remove resource caps so debug sessions are not OOMKilled
+#
+# This file is committed to git.
+# It contains NO secrets — all secret values come from .env (git-ignored).
 # =============================================================================
-
-name: foodorder
 
 services:
 
+  # ===========================================================================
+  # postgres — expose DB port to localhost for GUI tools
+  # ===========================================================================
   postgres:
-    # Expose to host loopback ONLY — not 0.0.0.0.
-    # Allows local DB GUI tools (DBeaver, TablePlus) to connect.
-    # Only accessible from the developer's own machine.
     ports:
+      # Bind to 127.0.0.1 only — prevents the dev DB from being accessible
+      # outside the host machine. Connect from pgAdmin/DBeaver/DataGrip via:
+      #   host: localhost  port: 5432  user/password: from .env
       - "127.0.0.1:5432:5432"
 
-    # More generous resource limits for dev
     deploy:
       resources:
         limits:
-          cpus:   '2.0'
-          memory: 1G
+          # No strict limits in dev — let PostgreSQL use what it needs
+          cpus:   "2.0"
+          memory: "1g"
 
+  # ===========================================================================
+  # app — Spring Boot development overrides
+  # ===========================================================================
   app:
-    # In dev, bind to all interfaces so you can test from a browser
-    # without needing a reverse proxy.
-    # NEVER do this in production (see docker-compose.yml comment).
-    ports:
-      - "8080:8080"
-      - "8081:8081"
-
-    # Disable read-only filesystem in dev to allow hot-reload tools,
-    # IDE debug agents, and framework temp file writes.
-    read_only: false
-
-    # Override resource limits to be more generous in dev
-    deploy:
-      resources:
-        limits:
-          cpus:   '2.0'
-          memory: 1G
-
     environment:
-      # Enable remote debug port — NEVER in production.
-      # Attach debugger: IntelliJ/VS Code → localhost:5005
+      # ── Spring profile ───────────────────────────────────────────────────────
+      # Overrides the 'prod' default set in docker-compose.yml.
+      # Dev profile enables: DEBUG logging, SQL echo, verbose Flyway, out-of-order
+      # migrations, smaller Hikari pool, and extended error responses.
+      SPRING_PROFILES_ACTIVE: dev
+
+      # ── HikariCP — dev-friendly pool sizing ──────────────────────────────────
+      DB_POOL_MAX_SIZE:  5
+      DB_POOL_MIN_IDLE:  2
+      # Disable leak detection — debugger sessions hold connections longer than
+      # the 60 s production threshold, causing false-positive leak warnings.
+      DB_POOL_LEAK_DETECTION_MS: "0"
+
+      # ── JDWP remote debugging ─────────────────────────────────────────────────
+      # JAVA_TOOL_OPTIONS is read by the JVM before processing the ENTRYPOINT
+      # command — no Dockerfile change is needed to enable remote debug.
+      #
+      # Connect from your IDE:
+      #   IntelliJ IDEA  → Run → Edit Configurations → Remote JVM Debug
+      #                    host=localhost, port=5005
+      #   VS Code        → launch.json type=java, request=attach, port=5005
+      #
+      # suspend=n — JVM starts immediately; change to suspend=y to pause
+      # at startup and wait for an IDE debugger connection before proceeding.
       JAVA_TOOL_OPTIONS: >-
         -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005
 
-    # Expose debugger port — loopback only
+      # ── Spring DevTools (optional) ────────────────────────────────────────────
+      # Requires spring-boot-devtools on the classpath. Devtools is declared
+      # optional in pom.xml and excluded from the production fat-JAR.
+      # Set to true only if you add devtools to your local classpath explicitly.
+      SPRING_DEVTOOLS_RESTART_ENABLED: "false"
+
     ports:
+      # API port — bound to 127.0.0.1 (localhost only)
+      - "127.0.0.1:8080:8080"
+
+      # Actuator / management port — localhost only
+      # curl http://localhost:8081/actuator/health
+      - "127.0.0.1:8081:8081"
+
+      # JDWP remote debug port — localhost only
+      # See JAVA_TOOL_OPTIONS above for IDE connection instructions
       - "127.0.0.1:5005:5005"
+
+    # ── Filesystem ────────────────────────────────────────────────────────────
+    # Overrides read_only: true from docker-compose.yml.
+    # Required for live-reload agents, IDE remote deployment, and any tool
+    # that writes to the container filesystem at runtime.
+    read_only: false
+
+    # Clear the tmpfs declarations from docker-compose.yml.
+    # With read_only disabled, /tmp is writable via the normal container FS.
+    tmpfs: []
+
+    deploy:
+      resources:
+        limits:
+          # Generous limits in dev — avoid OOMKilled during debug sessions
+          cpus:   "4.0"
+          memory: "1g"

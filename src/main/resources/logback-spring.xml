@@ -1,126 +1,435 @@
-<!-- ================================================================
-     logback-spring.xml
-     IMPORTANT: Use logback-spring.xml (not logback.xml) to enable
-     Spring's <springProfile> conditional blocks and property resolution.
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  logback-spring.xml — Production-grade logging configuration
 
-     Strategy:
-       - Dev/Test: Human-readable colored console output
-       - Prod: Structured JSON to stdout (captured by container runtime)
+  WHY logback-spring.xml AND NOT logback.xml
+  ══════════════════════════════════════════
+  Spring Boot processes logback-spring.xml through its own initializer, which:
+    1. Enables <springProfile> conditional blocks (critical for profile-based config)
+    2. Resolves Spring ${...} property placeholders inside XML
+    3. Allows Spring to take over the lifecycle (shutdown hooks, context refresh)
+  Using logback.xml bypasses all of the above.
 
-     What we log:
-       - HTTP request method, path, status, duration (via filter)
-       - Auth events: login success/failure (user ID only, never credentials)
-       - Business events: order placed, status changed, etc.
-       - All unhandled exceptions with stack trace + trace ID
-       - Startup: active profile, datasource URL (not credentials), Flyway results
+  STRATEGY
+  ════════
+  • dev   : Coloured human-readable console + human-readable rolling file
+  • test  : Minimal console output (silence CI noise) + rolling file at WARN+
+  • prod  : Structured JSON to stdout (captured by container/K8s runtime) +
+            JSON rolling file as a local safety net
 
-     What we NEVER log:
-       - Passwords, tokens, API keys — in any form, at any level
-       - Full request/response bodies (may contain PII or credentials)
-       - JWT token values (log subject claim only)
-       - Stack traces in API responses (log server-side, return trace ID)
-       - Credit card numbers or any PII in plain text
-     ================================================================ -->
+  LOG FILE LOCATION
+  ═════════════════
+  Controlled by the LOG_PATH environment variable (default: logs/).
+  Set LOG_PATH=/var/log/foodorder in production deployments.
 
+  WHAT WE LOG
+  ═══════════
+  • HTTP access: method, URI path, status, duration (RequestLoggingFilter)
+  • Slow requests: WARN when duration > 500 ms (RequestLoggingFilter)
+  • Auth events: login success/failure by user ID — never credentials
+  • Business events: order state changes, payment outcomes
+  • Application errors: full stack trace + traceId
+
+  WHAT WE NEVER LOG
+  ═════════════════
+  • Passwords, tokens, API keys — in any form, at any log level
+  • Request/response bodies (may contain PII or credentials)
+  • JWT token values (log subject claim only)
+  • Credit card numbers or any PII in plaintext
+  • Query strings (may contain tokens or sensitive search terms)
+-->
 <configuration scan="true" scanPeriod="30 seconds">
 
-    <!-- ============================================================
-         SPRING PROFILE: dev / test
-         Human-readable colored output. Full stack traces.
-         ============================================================ -->
+    <!-- ══════════════════════════════════════════════════════════════════
+         PROPERTIES
+         ════════════════════════════════════════════════════════════════ -->
+
+    <!--
+      Log file directory. Set via LOG_PATH environment variable.
+      Default: logs/ (relative to working directory — works in dev).
+      Production: set LOG_PATH=/var/log/foodorder or equivalent.
+    -->
+    <property name="LOG_PATH" value="${LOG_PATH:-logs}" />
+
+    <!--
+      Application name included in JSON output for log aggregator filtering.
+      Must match spring.application.name in application.yml.
+    -->
+    <property name="APP_NAME" value="foodorder-backend" />
+
+    <!--
+      Maximum file size before triggering a rollover.
+      50 MB gives ~10–20 minutes of high-traffic prod logs per file.
+    -->
+    <property name="MAX_FILE_SIZE" value="50MB" />
+
+    <!--
+      Total cap for all rolled log files.
+      Prevents filling the disk on a long-running instance.
+    -->
+    <property name="TOTAL_SIZE_CAP" value="1GB" />
+
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         CONVERSION RULES
+         Extend Logback's pattern language with custom converters.
+         ════════════════════════════════════════════════════════════════ -->
+
+    <!--
+      %clr(...){color} — ANSI colour wrapping (Logback + Spring Boot).
+      Available colours: red, green, yellow, blue, magenta, cyan, white, faint.
+      Only applied in terminals that support ANSI; no-ops otherwise.
+    -->
+    <conversionRule conversionWord="clr"
+                    converterClass="org.springframework.boot.logging.logback.ColorConverter" />
+
+    <conversionRule conversionWord="wex"
+                    converterClass="org.springframework.boot.logging.logback.WhitespaceThrowableProxyConverter" />
+
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         APPENDERS — DEV / TEST PROFILE
+         Human-readable coloured console output.
+         ════════════════════════════════════════════════════════════════ -->
+
     <springProfile name="dev,test">
 
+        <!--
+          CONSOLE — human-readable with ANSI colours
+
+          Pattern fields (left to right):
+            %d{HH:mm:ss.SSS}           — time (HH:mm:ss.SSS, no date — date is in filename)
+            %clr(%-5level)             — log level, right-padded to 5 chars, coloured
+            [%clr(%X{traceId:-}){cyan}] — traceId from MDC in cyan; empty string if absent
+            %-40.40logger{39}          — logger name, max 40 chars, truncated left
+            %msg                       — the log message
+            %n                         — platform newline
+            %wex                       — exception with whitespace-cleaned stack trace
+                                         (no %throwable — wex is superior: strips leading
+                                          whitespace from stack frames for cleaner output)
+
+          Note: %highlight() is deliberately NOT used on the whole line — it conflicts
+          with some terminal emulators on Windows. The level field is coloured only.
+        -->
         <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
             <encoder>
-                <pattern>
-                    %d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%cyan(%X{traceId:-NO_TRACE})] %boldWhite(%-40.40logger{39}) : %msg%n%throwable
-                </pattern>
+                <pattern>%d{HH:mm:ss.SSS} %clr(%-5level){faint} [%clr(%X{traceId:-NO_TRACE}){cyan}] %clr(%-40.40logger{39}){faint} : %msg%n%wex</pattern>
                 <charset>UTF-8</charset>
             </encoder>
         </appender>
 
-        <!-- Root logger: INFO in test (reduce CI noise), DEBUG in dev -->
-        <springProfile name="dev">
-            <root level="INFO">
-                <appender-ref ref="CONSOLE"/>
-            </root>
-            <logger name="com.foodorder" level="DEBUG" additivity="false">
-                <appender-ref ref="CONSOLE"/>
-            </logger>
-            <logger name="org.springframework.security" level="DEBUG" additivity="false">
-                <appender-ref ref="CONSOLE"/>
-            </logger>
-            <logger name="org.hibernate.SQL" level="DEBUG" additivity="false">
-                <appender-ref ref="CONSOLE"/>
-            </logger>
-            <!-- TRACE-level for SQL bind parameters — dev only, very verbose -->
-            <logger name="org.hibernate.type.descriptor.sql.BasicBinder" level="TRACE" additivity="false">
-                <appender-ref ref="CONSOLE"/>
-            </logger>
-        </springProfile>
+        <!--
+          FILE — human-readable rolling file for dev post-mortem debugging.
 
-        <springProfile name="test">
-            <root level="WARN">
-                <appender-ref ref="CONSOLE"/>
-            </root>
-            <logger name="com.foodorder" level="INFO" additivity="false">
-                <appender-ref ref="CONSOLE"/>
-            </logger>
-        </springProfile>
+          Rolling policy: time-based (daily) with size cap.
+          One file per day; older files compressed to .gz to save disk space.
+          Max 7 days of history (dev machines don't need long retention).
+
+          Why a file appender in dev?
+          Sometimes you need to grep across a full session's logs after the
+          terminal scrollback is gone. A dev log file covers this without
+          requiring log infrastructure.
+        -->
+        <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${LOG_PATH}/foodorder.log</file>
+            <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+                <!-- Daily rollover; .gz compression on rolled files -->
+                <fileNamePattern>${LOG_PATH}/foodorder.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+                <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+                <!-- 7 days retention in dev — adjust if you need longer debug history -->
+                <maxHistory>7</maxHistory>
+                <totalSizeCap>200MB</totalSizeCap>
+            </rollingPolicy>
+            <encoder>
+                <!-- Same pattern as CONSOLE but without ANSI colour codes (readable in editors) -->
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-NO_TRACE}] %-40.40logger{39} : %msg%n%wex</pattern>
+                <charset>UTF-8</charset>
+            </encoder>
+        </appender>
 
     </springProfile>
 
-    <!-- ============================================================
-         SPRING PROFILE: prod
-         Structured JSON output to stdout.
-         Container runtime (Docker/K8s) captures stdout and ships
-         to log aggregator (CloudWatch, Datadog, ELK stack, etc.)
-         No file appenders — file management is the orchestrator's job.
 
-         JSON fields: timestamp, level, traceId, logger, message, stackTrace
-         ============================================================ -->
+    <!-- ══════════════════════════════════════════════════════════════════
+         APPENDERS — PROD PROFILE
+         Structured JSON output.
+         ════════════════════════════════════════════════════════════════ -->
+
     <springProfile name="prod">
 
-        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-            <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
-                <!--
-                    Minimal JSON pattern without external logstash-logback-encoder dependency.
-                    For teams with logstash-logback-encoder on the classpath, replace with:
-                    <encoder class="net.logstash.logback.encoder.LogstashEncoder"/>
-                    which produces richer structured output with automatic MDC fields.
-                -->
-                <pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z',UTC}","level":"%level","traceId":"%X{traceId:-}","logger":"%logger{36}","message":"%replace(%msg){'\"','\\\"'}","thread":"%thread"}%n</pattern>
-                <charset>UTF-8</charset>
+        <!--
+          JSON_CONSOLE — structured JSON to stdout.
+
+          Container runtimes (Docker, Kubernetes) capture stdout and forward it
+          to a log aggregator (CloudWatch Logs, Datadog, Elasticsearch, Loki).
+          JSON-per-line format enables:
+            - Automatic field extraction without grok patterns
+            - Native traceId-based filtering in log UIs
+            - Exact message boundaries (no multi-line parsing needed)
+
+          ENCODER CHOICE: ch.qos.logback.classic.encoder.JsonEncoder
+          Available since logback-classic 1.4.8 (bundled with Spring Boot 3.2).
+          Produces properly escaped JSON — handles double-quotes, newlines, tabs,
+          and Unicode in message fields natively. No external dependencies needed.
+
+          Output example (one line per log event):
+          {
+            "timestamp": "2025-01-15T10:30:00.123Z",
+            "level": "INFO",
+            "thread": "http-nio-8080-exec-1",
+            "logger": "c.f.util.RequestLoggingFilter",
+            "message": "<-- GET /api/v1/orders | 200 | 42ms",
+            "mdc": { "traceId": "a3b2c1d0-e5f6-..." }
+          }
+
+          NOTE: If logstash-logback-encoder is added to pom.xml, replace this
+          encoder with:
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+              <includeCallerData>false</includeCallerData>
             </encoder>
+          LogstashEncoder adds: @version, host, service name, and richer MDC handling.
+        -->
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="ch.qos.logback.classic.encoder.JsonEncoder"/>
         </appender>
 
-        <!-- Async appender wraps JSON appender: non-blocking log writes -->
-        <appender name="ASYNC_JSON" class="ch.qos.logback.classic.AsyncAppender">
+        <!--
+          ASYNC_JSON_CONSOLE — non-blocking wrapper around JSON_CONSOLE.
+
+          Why async?
+          The ConsoleAppender writes synchronously to stdout. Under high load,
+          log writes can become a bottleneck — every request waits for the log
+          I/O to complete before the thread is released. The AsyncAppender
+          queues log events in memory and writes them on a dedicated background
+          thread.
+
+          neverBlock=true: if the queue is full, log events are DISCARDED rather
+          than blocking the application thread. This is the correct tradeoff for
+          a production API: availability over log completeness.
+
+          queueSize=1024: holds ~1024 log events before discarding begins.
+          At INFO level and typical request rates, this is never reached.
+
+          discardingThreshold=0: discard events of ALL levels when queue is ≥80%
+          full. Default is 20 (discards TRACE/DEBUG only). Setting 0 means we
+          discard everything uniformly — no special treatment for ERROR level.
+          If you want ERROR logs to never be dropped, set discardingThreshold=0
+          but add a separate synchronous ERROR appender.
+        -->
+        <appender name="ASYNC_JSON_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
             <appender-ref ref="JSON_CONSOLE"/>
-            <!-- Never block the app thread waiting for log queue: discard instead -->
+            <queueSize>1024</queueSize>
             <neverBlock>true</neverBlock>
-            <queueSize>512</queueSize>
-            <!-- Include caller info for ERROR level -->
+            <discardingThreshold>0</discardingThreshold>
+            <!-- Including caller data (class/method/line) is expensive — off in prod -->
             <includeCallerData>false</includeCallerData>
         </appender>
 
+        <!--
+          JSON_FILE — JSON rolling file as a local safety net.
+
+          Purpose: a local copy of structured logs as a fallback when the
+          central log aggregator is unavailable or when you need to inspect
+          logs on the host directly.
+
+          Rolling policy: time+size based.
+          - Daily rollover with .gz compression
+          - 30 days retention (enough for most incident investigations)
+          - 1 GB total cap (prevents disk exhaustion)
+
+          In K8s: mount a PVC at LOG_PATH or use an ephemeral volume.
+          In bare metal: LOG_PATH=/var/log/foodorder
+          In Docker: volume mount or use stdout-only and set maxHistory=0.
+        -->
+        <appender name="JSON_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${LOG_PATH}/foodorder.log</file>
+            <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+                <fileNamePattern>${LOG_PATH}/foodorder.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+                <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+                <!-- 30 days covers most post-incident investigation windows -->
+                <maxHistory>30</maxHistory>
+                <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+            </rollingPolicy>
+            <!-- Same JSON encoder as console — consistent format for grep/jq tools -->
+            <encoder class="ch.qos.logback.classic.encoder.JsonEncoder"/>
+        </appender>
+
+        <!--
+          ASYNC_JSON_FILE — non-blocking wrapper around JSON_FILE.
+
+          Same rationale as ASYNC_JSON_CONSOLE. File I/O is even slower than
+          stdout in high-throughput environments, so async is especially important
+          for the file appender.
+        -->
+        <appender name="ASYNC_JSON_FILE" class="ch.qos.logback.classic.AsyncAppender">
+            <appender-ref ref="JSON_FILE"/>
+            <queueSize>1024</queueSize>
+            <neverBlock>true</neverBlock>
+            <discardingThreshold>0</discardingThreshold>
+            <includeCallerData>false</includeCallerData>
+        </appender>
+
+    </springProfile>
+
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         LOGGER LEVELS — DEV PROFILE
+         Maximum visibility for local development.
+         ════════════════════════════════════════════════════════════════ -->
+
+    <springProfile name="dev">
+
+        <!-- Root: INFO — prevents framework noise while showing most application logs -->
         <root level="INFO">
-            <appender-ref ref="ASYNC_JSON"/>
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
         </root>
 
-        <!-- Our application code: INFO in prod -->
-        <logger name="com.foodorder" level="INFO" additivity="false">
-            <appender-ref ref="ASYNC_JSON"/>
+        <!-- Application code: DEBUG — see every decision the app makes -->
+        <logger name="com.foodorder" level="DEBUG" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
         </logger>
 
-        <!-- Suppress noisy framework loggers -->
-        <logger name="org.springframework.security" level="WARN" additivity="false">
-            <appender-ref ref="ASYNC_JSON"/>
+        <!-- Spring Security: DEBUG — see filter chain decisions and auth events -->
+        <logger name="org.springframework.security" level="DEBUG" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
         </logger>
+
+        <!-- Spring MVC request mapping: DEBUG — confirm routes are registered -->
+        <logger name="org.springframework.web.servlet" level="DEBUG" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+        <!-- Hibernate SQL: DEBUG — see every query. Bind params at TRACE. -->
+        <logger name="org.hibernate.SQL" level="DEBUG" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+        <!--
+          TRACE-level SQL bind parameters — extremely verbose.
+          Enable only when debugging a specific query with unexpected results.
+          NEVER enable in prod (exposes parameter values which may be PII).
+        -->
+        <logger name="org.hibernate.orm.jdbc.bind" level="TRACE" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+        <!-- Flyway: INFO — see migration execution at startup -->
+        <logger name="org.flywaydb" level="INFO" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+        <!-- HikariCP: DEBUG — see pool sizing, connection acquisition times -->
+        <logger name="com.zaxxer.hikari" level="DEBUG" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+    </springProfile>
+
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         LOGGER LEVELS — TEST PROFILE
+         Minimal output — fast CI, clean test results.
+         ════════════════════════════════════════════════════════════════ -->
+
+    <springProfile name="test">
+
+        <!-- Root: WARN — silence all framework chatter in CI -->
+        <root level="WARN">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </root>
+
+        <!-- Application code: INFO — enough to diagnose test failures -->
+        <logger name="com.foodorder" level="INFO" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+        <!-- Spring Security: WARN — auth failures still visible, normal flow silent -->
+        <logger name="org.springframework.security" level="WARN" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+        <!-- SQL: OFF — Testcontainers tests are slow enough without query logging -->
         <logger name="org.hibernate.SQL" level="OFF"/>
+        <logger name="org.hibernate.orm.jdbc.bind" level="OFF"/>
+
+        <!-- Flyway: WARN — suppress migration details in CI output -->
+        <logger name="org.flywaydb" level="WARN" additivity="false">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </logger>
+
+    </springProfile>
+
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         LOGGER LEVELS — PROD PROFILE
+         Production-grade signal-to-noise: visible alerts, silent noise.
+         ════════════════════════════════════════════════════════════════ -->
+
+    <springProfile name="prod">
+
+        <!-- Root: INFO — broad coverage, no DEBUG noise from framework code -->
+        <root level="INFO">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </root>
+
+        <!-- Application code: INFO — all access logs, business events, auth events -->
+        <logger name="com.foodorder" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </logger>
+
+        <!--
+          Spring Security: WARN — only authentication failures and access denials.
+          DEBUG would log every filter chain evaluation — too noisy for prod.
+        -->
+        <logger name="org.springframework.security" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </logger>
+
+        <!-- SQL: completely off in prod. All queries go through parameterised statements. -->
+        <logger name="org.hibernate.SQL" level="OFF"/>
+        <logger name="org.hibernate.orm.jdbc.bind" level="OFF"/>
         <logger name="org.hibernate.type" level="OFF"/>
+
+        <!-- Flyway: INFO at startup only (migration output). Silent afterward. -->
+        <logger name="org.flywaydb" level="INFO" additivity="false">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </logger>
+
+        <!-- HikariCP: WARN — pool exhaustion warnings are important; normal ops silent -->
         <logger name="com.zaxxer.hikari" level="WARN" additivity="false">
-            <appender-ref ref="ASYNC_JSON"/>
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </logger>
+
+        <!-- Tomcat internals: suppress unless debugging a container-level issue -->
+        <logger name="org.apache.tomcat" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </logger>
+        <logger name="org.apache.catalina" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
+        </logger>
+
+        <!-- Spring Boot autoconfiguration: WARN — suppress startup banner chatter -->
+        <logger name="org.springframework.boot" level="WARN" additivity="false">
+            <appender-ref ref="ASYNC_JSON_CONSOLE"/>
+            <appender-ref ref="ASYNC_JSON_FILE"/>
         </logger>
 
     </springProfile>

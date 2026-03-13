@@ -2,19 +2,17 @@ package com.foodorder;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /**
- * Application entry point.
+ * Application entry point — intentionally minimal.
  *
- * @SpringBootApplication is a meta-annotation combining:
- *   - @Configuration: marks this as a source of bean definitions
- *   - @EnableAutoConfiguration: activates Spring Boot's auto-wiring
- *   - @ComponentScan: scans com.foodorder and all sub-packages
+ * @SpringBootApplication combines:
+ *   @Configuration       — marks this as a bean source
+ *   @EnableAutoConfiguration — activates Spring Boot auto-wiring
+ *   @ComponentScan       — scans com.foodorder.** sub-packages
  *
- * Architecture note: No business logic here. This class is intentionally
- * minimal. Configuration is distributed to dedicated @Configuration classes
- * to follow the Single Responsibility Principle and keep this class readable.
+ * No beans or logic here. Configuration is distributed to dedicated
+ * @Configuration classes in com.foodorder.config to follow SRP.
  */
 @SpringBootApplication
 public class FoodOrderApplication {

@@ -1,123 +1,102 @@
-# Food Ordering System — Backend API
+# foodorder-backend
 
-Spring Boot 3 · Java 17 · PostgreSQL · JWT · Docker
+Spring Boot 3.2 backend skeleton for a food ordering system.
 
----
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Java 17 |
+| Framework | Spring Boot 3.2 |
+| Security | Spring Security 6 + JJWT 0.12 |
+| Persistence | Spring Data JPA + Hibernate |
+| Database | PostgreSQL 16 |
+| Migrations | Flyway |
+| Build | Maven 3.8+ |
+| Container | Docker (multi-stage, layered JAR) |
 
 ## Quick Start
 
 ```bash
 # 1. Clone and enter the project
-cd foodorder
+git clone <repo> && cd foodorder-backend
 
-# 2. Copy environment template and fill in values
-cp .env.example .env
-# Edit .env — generate JWT_SECRET: openssl rand -base64 32
+# 2. Copy env template and fill in secrets
+make setup   # copies .env.example → .env
 
-# 3. Start the stack
-docker compose up --build
+# 3. Edit .env — at minimum:
+#   DB_PASSWORD=<anything for local dev>
+#   JWT_SECRET=$(openssl rand -base64 32)
 
-# 4. Verify health
+# 4. Start everything
+make up
+
+# 5. Verify
 curl http://localhost:8080/api/v1/health
-curl http://localhost:8081/actuator/health
 ```
-
----
 
 ## Project Structure
 
 ```
 src/main/java/com/foodorder/
-├── FoodOrderApplication.java       # Entry point
-├── config/                         # Spring configuration beans
-│   ├── CorsConfig.java             # CORS policy
-│   ├── JwtProperties.java          # JWT config binding + validation
-│   ├── PasswordEncoderConfig.java  # BCrypt encoder (strength 12)
-│   └── SecurityConfig.java         # Security filter chain
-├── controller/                     # HTTP layer only
-│   └── HealthController.java
-├── dto/response/                   # API contracts
-│   ├── ApiResponse.java            # Universal response envelope
-│   └── ApiError.java              # Field-level validation errors
-├── exception/                      # Domain exceptions + handler
-│   ├── GlobalExceptionHandler.java # @RestControllerAdvice
-│   ├── ResourceNotFoundException.java
-│   └── BusinessException.java
-├── security/                       # JWT infrastructure
-│   ├── JwtAuthenticationEntryPoint.java
-│   ├── JwtAuthenticationFilter.java
-│   ├── JwtTokenProvider.java
-│   └── UserDetailsServiceImpl.java  # TODO: wire to UserRepository
+├── FoodOrderApplication.java    Entry point
+├── config/                      Spring configuration classes
+│   ├── CorsConfig.java          CORS policy
+│   ├── JwtProperties.java       app.jwt.* binding + validation
+│   ├── PasswordEncoderConfig.java  BCrypt encoder bean
+│   └── SecurityConfig.java      SecurityFilterChain, AuthenticationManager
+├── controller/
+│   └── HealthController.java    GET /api/v1/health
+├── dto/response/
+│   ├── ApiResponse.java         Universal response envelope
+│   └── ApiError.java            Field-level validation error
+├── exception/
+│   ├── BusinessException.java   409 Conflict domain errors
+│   ├── GlobalExceptionHandler.java  @RestControllerAdvice
+│   └── ResourceNotFoundException.java  404 Not Found
+├── security/
+│   ├── JwtAuthenticationEntryPoint.java  401 handler
+│   ├── JwtAuthenticationFilter.java      Per-request JWT validation
+│   ├── JwtTokenProvider.java             Token generation + validation
+│   └── UserDetailsServiceImpl.java       Stub → wire to UserRepository (Day 2)
 └── util/
-    └── RequestLoggingFilter.java   # MDC trace ID + request logging
+    └── RequestLoggingFilter.java  MDC traceId + request/response logging
 ```
-
----
 
 ## Environment Variables
 
-See `.env.example` for all required variables.
-
-| Variable | Required | Description |
-|---|---|---|
-| `JWT_SECRET` | **YES** | Base64 secret, min 32 chars. `openssl rand -base64 32` |
-| `POSTGRES_PASSWORD` | **YES** | Database password |
-| `DB_URL` | prod only | Full JDBC URL |
-| `DB_USERNAME` | prod only | DB user |
-| `DB_PASSWORD` | prod only | DB password |
-| `CORS_ALLOWED_ORIGINS` | no | Comma-separated origins |
-
----
-
-## Profiles
-
-| Profile | Usage | DDL | SQL Logging |
+| Variable | Required | Default | Description |
 |---|---|---|---|
-| `dev` | Local Docker Compose | validate | ON |
-| `test` | CI / Testcontainers | validate | OFF |
-| `prod` | Production | validate | OFF |
+| `DB_PASSWORD` | ✅ | — | PostgreSQL password |
+| `JWT_SECRET` | ✅ | — | Base64 HMAC secret (≥32 bytes) |
+| `DB_USERNAME` | | `foodorder` | PostgreSQL username |
+| `DB_URL` | | `jdbc:postgresql://localhost:5432/foodorder` | JDBC URL |
+| `JWT_EXPIRATION_MS` | | `3600000` | Access token TTL (1h) |
+| `JWT_REFRESH_EXPIRATION_MS` | | `86400000` | Refresh token TTL (24h) |
+| `CORS_ALLOWED_ORIGINS` | | `http://localhost:3000,...` | Comma-separated origins |
+| `SPRING_PROFILES_ACTIVE` | | `prod` | Spring profile |
 
-```bash
-# Run with a specific profile
-SPRING_PROFILES_ACTIVE=dev java -jar app.jar
-```
+## API Endpoints
 
----
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/v1/health` | None | Application liveness |
+| GET | `/actuator/health` | None (port 8081) | Deep health + DB check |
 
-## API Response Contract
+## Security Architecture
 
-Every response uses the same envelope:
-
-```json
-{
-  "success": true,
-  "statusCode": 200,
-  "message": "...",
-  "data": {},
-  "errors": null,
-  "timestamp": "2025-01-01T12:00:00Z",
-  "traceId": "abc-123"
-}
-```
-
----
-
-## Security Baseline
-
-- **Stateless JWT**: No server-side sessions
-- **CSRF disabled**: Correct for stateless API (no session cookies)
-- **BCrypt strength 12**: Password hashing
-- **Secrets via env vars**: Never hardcoded
-- **Generic error messages**: No internal details leaked to clients
-- **Trace IDs**: Correlation via `X-Trace-Id` header + MDC
-
----
+- **Stateless JWT**: no server-side sessions; every request carries a Bearer token
+- **CSRF disabled**: correct for stateless JWT APIs (no session cookies)
+- **Per-request user load**: UserDetails loaded fresh on each request for role/revocation consistency
+- **Secret validation**: app refuses to start with missing or short JWT secret
+- **No secrets in source**: all credentials via environment variables with `${VAR:?error}` syntax
 
 ## Day 2 Checklist
 
-- [ ] Implement `User` entity + `UserRepository`
-- [ ] Wire `UserDetailsServiceImpl` to real DB
-- [ ] Implement `AuthController` (login/register/refresh)
-- [ ] Add token revocation (Redis blocklist in `JwtTokenProvider`)
-- [ ] Add `V1__init_schema.sql` with real table definitions
-- [ ] Add integration tests with Testcontainers
+- [ ] Implement `UserDetailsServiceImpl` → wire to `UserRepository`
+- [ ] Add `User` JPA entity
+- [ ] Add `POST /api/v1/auth/login` endpoint
+- [ ] Add `POST /api/v1/auth/register` endpoint
+- [ ] Add `POST /api/v1/auth/refresh` endpoint
+- [ ] Add Redis token revocation blocklist
+- [ ] Add `Order`, `Restaurant`, `MenuItem` entities + APIs
